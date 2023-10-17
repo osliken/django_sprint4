@@ -1,4 +1,3 @@
-from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db.models import Count
@@ -10,8 +9,7 @@ from django.views.generic import (
 )
 
 from blog.forms import CommentForm, PostForm
-from blog.models import Category, Comment, Post
-
+from blog.models import Category, Comment, get_user_model, Post
 
 NUM_POSTS = 10
 User = get_user_model()
@@ -28,14 +26,31 @@ def get_post_list():
     )
 
 
-class PostListView(ListView):
+class PostMixin:
+    model = Post
+    paginate_by = NUM_POSTS
+
+    def get_queryset(self):
+        return get_post_list()
+
+
+class CommentMixin(LoginRequiredMixin):
+    model = Comment
+    pk_url_kwarg = 'comment_id'
+    template_name = 'blog/comment.html'
+
+    def get_queryset(self):
+        return Comment.objects.filter(author=self.request.user)
+
+
+class PostListView(PostMixin, ListView):
     """Страница списка постов."""
 
-    model = Post
-    queryset = get_post_list().annotate(
-        comment_count=(Count('comments'))).order_by('-pub_date')
-    paginate_by = NUM_POSTS
     template_name = 'blog/index.html'
+
+    def get_queryset(self):
+        return super().get_queryset().annotate(
+            comment_count=(Count('comments'))).order_by('-pub_date')
 
 
 class PostDetailView(DetailView):
@@ -46,17 +61,16 @@ class PostDetailView(DetailView):
     template_name = 'blog/detail.html'
 
     def get_object(self, queryset=None):
-        instance = get_object_or_404(
+        post = get_object_or_404(
             Post,
             pk=self.kwargs['post_id']
         )
-        if instance.author == self.request.user:
-            return instance
-        else:
-            return get_object_or_404(
-                get_post_list(),
-                pk=self.kwargs['post_id']
-            )
+        if post.author == self.request.user:
+            return post
+        return get_object_or_404(
+            get_post_list(),
+            pk=self.kwargs['post_id']
+        )
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -65,34 +79,32 @@ class PostDetailView(DetailView):
         return context
 
 
-class CategoryPostsListView(ListView):
+class CategoryPostsListView(PostMixin, ListView):
     """Страница списка категорий поста."""
 
     model = Category
-    paginate_by = NUM_POSTS
     slug_url_kwarg = 'category_slug'
     template_name = 'blog/category.html'
 
     def get_queryset(self):
-        return get_post_list().filter(
-            category__slug=self.kwargs['category_slug']
-        ).annotate(comment_count=Count('comments')).order_by('-pub_date')
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context['category'] = get_object_or_404(
+        self.category = get_object_or_404(
             Category,
             slug=self.kwargs['category_slug'],
             is_published=True
         )
+        return super().get_queryset().filter(
+            category__slug=self.kwargs['category_slug']).annotate(
+            comment_count=Count('comments')).order_by('-pub_date')
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['category'] = self.category
         return context
 
 
-class ProfileListView(ListView):
+class ProfileListView(PostMixin, ListView):
     """Страница профиля."""
 
-    model = Post
-    paginate_by = NUM_POSTS
     slug_url_kwarg = 'username'
     template_name = 'blog/profile.html'
 
@@ -101,11 +113,10 @@ class ProfileListView(ListView):
             User,
             username=self.kwargs['username']
         )
-        return Post.objects.select_related(
-            'author', 'location', 'category'
-        ).filter(author=self.author).order_by(
-            '-pub_date'
-        ).annotate(comment_count=Count('comments'))
+        if self.author != self.request.user:
+            return super().get_queryset().annotate(
+                comment_count=Count('comments')).order_by('-pub_date')
+        return Post.objects.filter(author=self.author)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -139,7 +150,7 @@ class PostCreateView(LoginRequiredMixin, CreateView):
         return reverse('blog:profile', args=[self.request.user])
 
 
-class PostUpdateView(UpdateView):
+class PostUpdateView(LoginRequiredMixin, UpdateView):
     """Страница редактирования поста."""
 
     model = Post
@@ -148,11 +159,7 @@ class PostUpdateView(UpdateView):
     template_name = 'blog/create.html'
 
     def dispatch(self, request, *args, **kwargs):
-        instance = get_object_or_404(
-            Post,
-            pk=kwargs['post_id'],
-        )
-        if instance.author != request.user:
+        if self.get_object().author != request.user:
             return redirect('blog:post_detail', kwargs['post_id'])
         return super().dispatch(request, *args, **kwargs)
 
@@ -160,12 +167,12 @@ class PostUpdateView(UpdateView):
 @login_required
 def post_delete(request, post_id):
     """Страница удаления поста."""
-    instance = get_object_or_404(Post, pk=post_id)
-    form = PostForm(instance=instance)
+    post = get_object_or_404(Post, pk=post_id)
+    form = PostForm(instance=post)
     context = {'form': form}
     if request.method == 'POST':
-        if instance.author == request.user:
-            instance.delete()
+        if post.author == request.user:
+            post.delete()
         return redirect('blog:index')
     return render(request, 'blog/create.html', context)
 
@@ -173,40 +180,32 @@ def post_delete(request, post_id):
 class CommentCreateView(LoginRequiredMixin, CreateView):
     """Страница создания комментария поста."""
 
-    post_object = None
     model = Comment
     form_class = CommentForm
     template_name = 'blog/comment.html'
-
-    def dispatch(self, request, *args, **kwargs):
-        self.post_object = get_object_or_404(Post, pk=kwargs['post_id'])
-        return super().dispatch(request, *args, **kwargs)
 
     def form_valid(self, form):
         form.instance.author = self.request.user
-        form.instance.post = self.post_object
+        form.instance.post = get_object_or_404(
+            Post,
+            pk=self.kwargs['post_id']
+        )
         return super().form_valid(form)
 
 
-class CommentUpdateView(LoginRequiredMixin, UpdateView):
+class CommentUpdateView(CommentMixin, UpdateView):
     """Страница редактирования комментария поста."""
 
-    model = Comment
     form_class = CommentForm
-    pk_url_kwarg = 'comment_id'
-    template_name = 'blog/comment.html'
 
     def get_queryset(self):
-        return Comment.objects.filter(author=self.request.user)
+        return super().get_queryset()
 
 
-class CommentDeleteView(LoginRequiredMixin, DeleteView):
+class CommentDeleteView(CommentMixin, DeleteView):
     """Страница удаления комментария поста."""
 
-    model = Comment
-    pk_url_kwarg = 'comment_id'
-    template_name = 'blog/comment.html'
     success_url = reverse_lazy('blog:index')
 
     def get_queryset(self):
-        return Comment.objects.filter(author=self.request.user)
+        return super().get_queryset()
