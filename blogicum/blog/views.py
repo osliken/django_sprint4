@@ -1,56 +1,21 @@
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.db.models import Count
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
-from django.utils import timezone
 from django.views.generic import (
     CreateView, DeleteView, DetailView, ListView, UpdateView
 )
 
 from blog.forms import CommentForm, PostForm
-from blog.models import Category, Comment, get_user_model, Post
-
-NUM_POSTS = 10
-User = get_user_model()
-
-
-def get_post_list():
-    """Список объектов Post."""
-    return Post.objects.select_related(
-        'author', 'location', 'category'
-    ).filter(
-        pub_date__lte=timezone.now(),
-        is_published=True,
-        category__is_published=True
-    )
-
-
-class PostMixin:
-    model = Post
-    paginate_by = NUM_POSTS
-
-    def get_queryset(self):
-        return get_post_list()
-
-
-class CommentMixin(LoginRequiredMixin):
-    model = Comment
-    pk_url_kwarg = 'comment_id'
-    template_name = 'blog/comment.html'
-
-    def get_queryset(self):
-        return Comment.objects.filter(author=self.request.user)
+from blog.mixins import CommentMixin, PostMixin
+from blog.models import Category, Comment, Post, User
+from blog.utils import get_post_list
 
 
 class PostListView(PostMixin, ListView):
     """Страница списка постов."""
 
     template_name = 'blog/index.html'
-
-    def get_queryset(self):
-        return super().get_queryset().annotate(
-            comment_count=(Count('comments'))).order_by('-pub_date')
 
 
 class PostDetailView(DetailView):
@@ -62,7 +27,9 @@ class PostDetailView(DetailView):
 
     def get_object(self, queryset=None):
         post = get_object_or_404(
-            Post,
+            Post.objects.select_related(
+                'author', 'location', 'category'
+            ),
             pk=self.kwargs['post_id']
         )
         if post.author == self.request.user:
@@ -92,9 +59,7 @@ class CategoryPostsListView(PostMixin, ListView):
             slug=self.kwargs['category_slug'],
             is_published=True
         )
-        return super().get_queryset().filter(
-            category__slug=self.kwargs['category_slug']).annotate(
-            comment_count=Count('comments')).order_by('-pub_date')
+        return super().get_queryset().filter(category=self.category)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -114,9 +79,9 @@ class ProfileListView(PostMixin, ListView):
             username=self.kwargs['username']
         )
         if self.author != self.request.user:
-            return super().get_queryset().annotate(
-                comment_count=Count('comments')).order_by('-pub_date')
-        return Post.objects.filter(author=self.author)
+            return super().get_queryset()
+        return Post.objects.select_related(
+            'author', 'location', 'category').filter(author=self.author)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -193,19 +158,13 @@ class CommentCreateView(LoginRequiredMixin, CreateView):
         return super().form_valid(form)
 
 
-class CommentUpdateView(CommentMixin, UpdateView):
+class CommentUpdateView(CommentMixin, LoginRequiredMixin, UpdateView):
     """Страница редактирования комментария поста."""
 
     form_class = CommentForm
 
-    def get_queryset(self):
-        return super().get_queryset()
 
-
-class CommentDeleteView(CommentMixin, DeleteView):
+class CommentDeleteView(CommentMixin, LoginRequiredMixin, DeleteView):
     """Страница удаления комментария поста."""
 
     success_url = reverse_lazy('blog:index')
-
-    def get_queryset(self):
-        return super().get_queryset()

@@ -95,21 +95,23 @@ class Comment(models.Model):
     post = models.ForeignKey(
         Post,
         on_delete=models.CASCADE,
-        related_name='comments',
         verbose_name='Пост'
     )
     created_at = models.DateTimeField('Добавлено', auto_now_add=True)
     author = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
-        related_name='authors',
         verbose_name='Автор'
     )
 
     class Meta:
         verbose_name = 'комментарий'
         verbose_name_plural = 'Комментарии'
+        default_related_name = 'comments'
         ordering = ('created_at',)
+
+    def __str__(self):
+        return f'Комментарий поста: {self.post}, автора: {self.author}'
 
     def get_absolute_url(self):
         return reverse('blog:post_detail', kwargs={'post_id': self.post_id})
